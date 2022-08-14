@@ -60,10 +60,12 @@ if [ -z "$key" ] && { [ -z "$user" ] || [ -z "$password" ]; } then
  exit 1
 fi
 
-if ! type rsync &>/dev/null; then 
-  echo "This program requires rsync."
-  exit 1
-fi
+for program in rsync file wget curl jq; do
+  if ! type "$program" &>/dev/null; then 
+    echo "This program requires $program."
+    exit 1
+  fi
+done
 
 ###############################################################################
 
@@ -78,10 +80,6 @@ CANVAS_DOMAIN="https://canvas.nus.edu.sg"
 CANVAS_AUTH_API="/api/v1/users/self"
 CANVAS_MODULES_API="/api/v1/courses"
 CANVAS_FILES_SUFFIX="files?per_page=30"
-
-# CANVAS_FOLDERS_API="/api/v1/folders"
-# CANVAS_FILES_API="/api/v1/files"
-# CANVAS_FOLDERS_SUFFIX="folders?per_page=30"
 
 TMP_DIR=$(mktemp -d)
 COOKIE_JAR=$(mktemp)
