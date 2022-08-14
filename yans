@@ -1,0 +1,278 @@
+#!/usr/bin/env bash
+
+usage() {
+  local name=${0##*/}
+  echo "Provide either the credentials to Canvas or Luminus (or both)."
+  echo "By default, $name syncs to your default download location."
+
+  echo "Usage:"
+  echo "  $name -v -k [CANVAS_API_KEY] -u [LUMINUS_USER_ID] -p [LUMINUS_PASSWORD] SYNC_DIR"
+  echo "Example:"
+  echo "  $name -u \"nusstu\\e0260000\" -p \"\$(pass show nus_password)\" ~/current"
+  exit "$1"
+}
+
+DEBUG() {
+  if [ "$debug" == true ]; then
+    echo "$@"
+  fi
+}
+
+for arg in "$@"; do
+  shift
+  case "$arg" in
+    '--key')      set -- "$@" '-k'   ;;
+    '--user')     set -- "$@" '-u'   ;;
+    '--password') set -- "$@" '-p'   ;;
+    '--help')     set -- "$@" '-h'   ;;
+    '--debug')    set -- "$@" '-D'   ;;
+    '--verbose')  set -- "$@" '-v'   ;;
+    *)            set -- "$@" "$arg" ;;
+  esac
+done
+
+key=
+user=
+password=
+verbose=false
+debug=false
+while getopts "hvDdk:u:p:" o; do
+  case "$o" in
+    v) verbose=true ;;
+    D) debug=true ;;
+    k) key="$OPTARG";;
+    u) user="$OPTARG";;
+    p) password="$OPTARG";;
+    h | *) usage 0;;
+  esac
+done
+shift $((OPTIND-1))
+
+download_dir="${XDG_DOWNLOAD_DIR:-$HOME/Downloads}"
+if [ -n "$1" ]; then
+  ! [ -d "$1" ] && { echo "Please provide a valid sync directory."; exit 1; }
+  download_dir="$1"
+fi
+DEBUG "Download directory: $download_dir"
+
+if [ -z "$key" ] && { [ -z "$user" ] || [ -z "$password" ]; } then
+ echo "Provide at least the credentials for Luminus or Canvas."
+ exit 1
+fi
+
+if ! type rsync &>/dev/null; then 
+  echo "This program requires rsync."
+  exit 1
+fi
+
+###############################################################################
+
+LUMINUS_VAFS_URL="https://vafs.nus.edu.sg/adfs/oauth2/authorize?response_type=code&client_id=E10493A3B1024F14BDC7D0D8B9F649E9-234390&state=V6E9kYSq3DDQ72fSZZYFzLNKFT9dz38vpoR93IL8&redirect_uri=https://luminus.nus.edu.sg/auth/callback&scope=&resource=sg_edu_nus_oauth&nonce=V6E9kYSq3DDQ72fSZZYFzLNKFT9dz38vpoR93IL8"
+LUMINUS_DOMAIN="https://luminus.nus.edu.sg"
+LUMINUS_REDIRECT_API="/auth/callback"
+LUMINUS_JWT_API="/v2/api/login/adfstoken"
+LUMINUS_MODULE_API="/v2/api/module/?populate=Creator,termDetail,isMandatory"
+LUMINUS_FILES_API="/v2/api/files/?populate=totalFileCount,subFolderCount,TotalSize"
+
+CANVAS_DOMAIN="https://canvas.nus.edu.sg"
+CANVAS_AUTH_API="/api/v1/users/self"
+CANVAS_MODULES_API="/api/v1/courses"
+CANVAS_FILES_SUFFIX="files?per_page=30"
+
+# CANVAS_FOLDERS_API="/api/v1/folders"
+# CANVAS_FILES_API="/api/v1/files"
+# CANVAS_FOLDERS_SUFFIX="folders?per_page=30"
+
+TMP_DIR=$(mktemp -d)
+COOKIE_JAR=$(mktemp)
+clean() {
+ rm -r "$TMP_DIR"
+ rm "$COOKIE_JAR"
+ exit "$1"
+}
+
+curl_common() {
+  curl -s \
+    -H "Content-Type: application/x-www-form-urlencoded" \
+    -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:94.0) Gecko/20100101 Firefox/94.0" \
+    "$@"
+}
+
+wget_common() {
+  wget -q --show-progress "$@"
+}
+
+auth_canvas() {
+  # $1 - API key
+  [ -n "$1" ] || clean 1
+
+  curl_common \
+    -H "Authorization: Bearer $1" \
+    "$CANVAS_DOMAIN$CANVAS_AUTH_API" >/dev/null
+}
+
+auth_luminus() {
+  # $1 - username
+  # $2 - password
+  [ -n "$1" ] || clean 1
+  [ -n "$2" ] || clean 1
+
+  curl_common -X POST \
+    --data-urlencode "UserName=$1" \
+    --data-urlencode "Password=$2" \
+    --data-urlencode "AuthMethod=FormsAuthentication" \
+    --cookie-jar "$COOKIE_JAR" \
+    "$LUMINUS_VAFS_URL"
+
+  redirect=$(curl_common -i -X POST \
+    --data-urlencode "UserName=$1" \
+    --data-urlencode "Password=$2" \
+    --data-urlencode "AuthMethod=FormsAuthentication" \
+    --cookie "$COOKIE_JAR" \
+    "$LUMINUS_VAFS_URL" | grep Location:)
+
+  redirect=${redirect#*code=}
+  code=${redirect%&state=*}
+
+  curl_common \
+    --data-urlencode "redirect_uri=$LUMINUS_DOMAIN$LUMINUS_REDIRECT_API" \
+    --data-urlencode "code=$code" \
+    --data-urlencode "resource=sg_edu_nus_oauth" \
+    --data-urlencode "client_id=E10493A3B1024F14BDC7D0D8B9F649E9-234390" \
+    --data-urlencode "grant_type=authorization_code" \
+    "$LUMINUS_DOMAIN$LUMINUS_JWT_API" | jq -r '.access_token'
+}
+
+luminus-sync() {
+  # $1 - jwt
+  jwt=$1
+  modules=$(curl_common -H "Authorization: Bearer $jwt" "$LUMINUS_DOMAIN$LUMINUS_MODULE_API" | \
+    jq -r '.data[] | select(.term == "2210" and .id != "00000000-0000-0000-0000-000000000000") | .id, .name')
+
+  while read -r module_id; do
+    read -r module_name
+
+    # Remove potential '/' characters from module_name.
+    module_name="${module_name%%/*}"
+
+    if [ -z "$module_id" ] || [ -z "$module_name" ]; then
+      DEBUG "unexpected empty id or name"
+      continue
+    fi
+
+    echo "Syncing $module_name."
+
+    module_dir="$TMP_DIR/$module_name"
+    DEBUG "Creating module: $module_dir"
+    mkdir -p "$module_dir"
+
+    folders=$(curl_common -H "Authorization: Bearer $jwt" "$LUMINUS_DOMAIN$LUMINUS_FILES_API&ParentId=$module_id" | \
+      jq -r '.data[] | select(.totalFileCount > 0) | .id, .name')
+
+    DEBUG "Get folders: $folders"
+    while read -r id; do
+      read -r name
+
+      if [ -z "$id" ] || [ -z "$name" ]; then
+        DEBUG "unexpected empty name or id: ${id:-null}"
+        break
+      fi
+
+      url=$(curl_common -H "Authorization: Bearer $jwt" "$LUMINUS_DOMAIN${LUMINUS_FILES_API%/*}/$id/downloadurl" | \
+      jq -r 'select(.code == 200).data')
+
+      if [ -z "$url" ]; then
+        echo "Failed retrieving module $module_name."
+        continue
+      fi
+
+      DEBUG "Get url: $url"
+
+      wget_common -P "$TMP_DIR" "$url"
+      f="$TMP_DIR/$(basename "$url")"
+
+      if [ "$(file --dereference --brief --mime-type -- "$f")" == "application/zip" ]; then
+        unzip -q -d "$module_dir" "$f"
+      else
+        mv "$f" "$module_dir/$name"
+      fi
+    done <<< "$folders"
+
+    if [ "$verbose" == true ]; then  
+      rsync -av "$module_dir" "$download_dir"
+    else
+      rsync -aq "$module_dir" "$download_dir" &>/dev/null
+    fi
+  done <<< "$modules"
+}
+
+canvas_get_files() {
+  # $1 - $key
+  courses=$(curl_common -H "Authorization: Bearer $key" "$CANVAS_DOMAIN$CANVAS_MODULES_API" | \
+    jq -r '.[] | select(.course_code != null) | .id, .course_code')
+
+  while read -r course_id; do
+    read -r course_code
+
+    # Remove potential '/' characters from course_code.
+    course_code="${course_code%%/*}"
+
+    if [ -z "$course_id" ] || [ -z "$course_code" ]; then
+      DEBUG "unexpected empty id or code"
+      continue
+    fi
+
+    echo "Syncing $course_code."
+
+    course_dir="$TMP_DIR/$course_code"
+    DEBUG "Creating course: $course_dir"
+    mkdir -p "$course_dir"
+
+    urls=$(curl_common -H "Authorization: Bearer $key" "$CANVAS_DOMAIN$CANVAS_MODULES_API/$course_id/$CANVAS_FILES_SUFFIX" | \
+      jq -r '.[] | select(.locked == false) | .url, .display_name')
+
+    DEBUG "Urls: $urls"
+    # Support top-level files downloading for now.
+    while read -r url; do
+      read -r filename
+
+      [ -n "$url" ] && [ -n "$filename" ] && wget_common -O "$course_dir/$filename" "$url"
+    done <<< "$urls"
+
+    if [ "$verbose" == true ]; then  
+      rsync -av "$course_dir" "$download_dir"
+    else
+      rsync -aq "$course_dir" "$download_dir" &>/dev/null
+    fi
+  done <<< "$courses"
+}
+
+main() {
+  # Luminus.
+  if [ -n "$user" ] && [ -n "$password" ]; then
+    echo "Logging into Luminus."
+    jwt=$(auth_luminus "$user" "$password")
+
+    if [ -z "$jwt" ]; then
+      echo "Failed to log into Luminus."
+      clean 1
+    fi
+
+    DEBUG "Got Luminus token: $jwt"
+
+    echo "Syncing Luminus files."
+    luminus-sync "$jwt"
+  fi
+
+  # Canvas.
+  if [ -z "$key" ]; then
+    clean 0
+  fi
+
+  echo "Verifying Canvas API key."
+  auth_canvas "$key" || { echo "Invalid Canvas API key."; clean 2; }
+  echo "Syncing Canvas files."
+  canvas_get_files "$key"
+  clean 0
+}
+main
