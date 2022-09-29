@@ -1,7 +1,7 @@
-#!/usr/bin/env bash
+#!/bin/sh
 
 usage() {
-  local name=${0##*/}
+  name="${0##*/}"
   echo "Provide either the credentials to Canvas or Luminus (or both)."
   echo "By default, $name syncs to your default download location."
 
@@ -13,7 +13,7 @@ usage() {
 }
 
 DEBUG() {
-  if [ "$debug" == true ]; then
+  if [ "$debug" = true ]; then
     echo "$@"
   fi
 }
@@ -60,12 +60,10 @@ if [ -z "$key" ] && { [ -z "$user" ] || [ -z "$password" ]; } then
  exit 1
 fi
 
-for program in rsync file wget curl jq; do
-  if ! type "$program" &>/dev/null; then 
-    echo "This program requires $program."
-    exit 1
-  fi
-done
+if ! type rsync >/dev/null 2>&1; then 
+  echo "This program requires rsync."
+  exit 1
+fi
 
 ###############################################################################
 
@@ -80,6 +78,10 @@ CANVAS_DOMAIN="https://canvas.nus.edu.sg"
 CANVAS_AUTH_API="/api/v1/users/self"
 CANVAS_MODULES_API="/api/v1/courses"
 CANVAS_FILES_SUFFIX="files?per_page=30"
+
+# CANVAS_FOLDERS_API="/api/v1/folders"
+# CANVAS_FILES_API="/api/v1/files"
+# CANVAS_FOLDERS_SUFFIX="folders?per_page=30"
 
 TMP_DIR=$(mktemp -d)
 COOKIE_JAR=$(mktemp)
@@ -141,12 +143,11 @@ auth_luminus() {
     "$LUMINUS_DOMAIN$LUMINUS_JWT_API" | jq -r '.access_token'
 }
 
-luminus-sync() {
+luminus_sync() {
   # $1 - jwt
   jwt=$1
-  modules=$(curl_common -H "Authorization: Bearer $jwt" "$LUMINUS_DOMAIN$LUMINUS_MODULE_API" | \
-    jq -r '.data[] | select(.term == "2210" and .id != "00000000-0000-0000-0000-000000000000") | .id, .name')
-
+  curl_common -H "Authorization: Bearer $jwt" "$LUMINUS_DOMAIN$LUMINUS_MODULE_API" |\
+    jq -r '.data[] | select(.term == "2210" and .id != "00000000-0000-0000-0000-000000000000") | .id, .name' |\
   while read -r module_id; do
     read -r module_name
 
@@ -164,10 +165,8 @@ luminus-sync() {
     DEBUG "Creating module: $module_dir"
     mkdir -p "$module_dir"
 
-    folders=$(curl_common -H "Authorization: Bearer $jwt" "$LUMINUS_DOMAIN$LUMINUS_FILES_API&ParentId=$module_id" | \
-      jq -r '.data[] | select(.totalFileCount > 0) | .id, .name')
-
-    DEBUG "Get folders: $folders"
+    curl_common -H "Authorization: Bearer $jwt" "$LUMINUS_DOMAIN$LUMINUS_FILES_API&ParentId=$module_id" |\
+      jq -r '.data[] | select(.totalFileCount > 0) | .id, .name' |\
     while read -r id; do
       read -r name
 
@@ -176,7 +175,7 @@ luminus-sync() {
         break
       fi
 
-      url=$(curl_common -H "Authorization: Bearer $jwt" "$LUMINUS_DOMAIN${LUMINUS_FILES_API%/*}/$id/downloadurl" | \
+      url=$(curl_common -H "Authorization: Bearer $jwt" "$LUMINUS_DOMAIN${LUMINUS_FILES_API%/*}/$id/downloadurl" |\
       jq -r 'select(.code == 200).data')
 
       if [ -z "$url" ]; then
@@ -189,26 +188,25 @@ luminus-sync() {
       wget_common -P "$TMP_DIR" "$url"
       f="$TMP_DIR/$(basename "$url")"
 
-      if [ "$(file --dereference --brief --mime-type -- "$f")" == "application/zip" ]; then
+      if [ "$(file --dereference --brief --mime-type -- "$f")" = "application/zip" ]; then
         unzip -q -d "$module_dir" "$f"
       else
         mv "$f" "$module_dir/$name"
       fi
-    done <<< "$folders"
+    done
 
-    if [ "$verbose" == true ]; then  
+    if [ "$verbose" = true ]; then  
       rsync -av "$module_dir" "$download_dir"
     else
-      rsync -aq "$module_dir" "$download_dir" &>/dev/null
+      rsync -aq "$module_dir" "$download_dir" >/dev/null 2>&1
     fi
-  done <<< "$modules"
+  done
 }
 
 canvas_get_files() {
   # $1 - $key
-  courses=$(curl_common -H "Authorization: Bearer $key" "$CANVAS_DOMAIN$CANVAS_MODULES_API" | \
-    jq -r '.[] | select(.course_code != null) | .id, .course_code')
-
+  curl_common -H "Authorization: Bearer $key" "$CANVAS_DOMAIN$CANVAS_MODULES_API" |\
+    jq -r '.[] | select(.course_code != null) | .id, .course_code' |\
   while read -r course_id; do
     read -r course_code
 
@@ -226,23 +224,21 @@ canvas_get_files() {
     DEBUG "Creating course: $course_dir"
     mkdir -p "$course_dir"
 
-    urls=$(curl_common -H "Authorization: Bearer $key" "$CANVAS_DOMAIN$CANVAS_MODULES_API/$course_id/$CANVAS_FILES_SUFFIX" | \
-      jq -r '.[] | select(.locked == false) | .url, .display_name')
-
-    DEBUG "Urls: $urls"
     # Support top-level files downloading for now.
+    curl_common -H "Authorization: Bearer $key" "$CANVAS_DOMAIN$CANVAS_MODULES_API/$course_id/$CANVAS_FILES_SUFFIX" |\
+      jq -r '.[] | select(.locked == false) | .url, .display_name' |\
     while read -r url; do
       read -r filename
 
       [ -n "$url" ] && [ -n "$filename" ] && wget_common -O "$course_dir/$filename" "$url"
-    done <<< "$urls"
+    done
 
-    if [ "$verbose" == true ]; then  
+    if [ "$verbose" = true ]; then  
       rsync -av "$course_dir" "$download_dir"
     else
-      rsync -aq "$course_dir" "$download_dir" &>/dev/null
+      rsync -aq "$course_dir" "$download_dir" >/dev/null 2>&1
     fi
-  done <<< "$courses"
+  done
 }
 
 main() {
@@ -259,7 +255,7 @@ main() {
     DEBUG "Got Luminus token: $jwt"
 
     echo "Syncing Luminus files."
-    luminus-sync "$jwt"
+    luminus_sync "$jwt"
   fi
 
   # Canvas.
