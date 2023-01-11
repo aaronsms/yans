@@ -2,6 +2,8 @@
 
 Shell script to sync your files from NUS Canvas.
 
+Canvas [token](https://canvas.nus.edu.sg/profile/settings) can be obtained from your Account > Settings > Approved integrations > New access token. 
+
 Only files available through Canvas API are downloaded; externals in-text links and readings are not supported.
 
 > yans -k "\$(pass show canvas-api)" ~/nus
