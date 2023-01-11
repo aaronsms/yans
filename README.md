@@ -1,13 +1,17 @@
 # Yet Another NUS Sync
 
-This is a simple script that sync your files from both Luminus and Canvas.
+Shell script to sync your files from NUS Canvas.
 
-> yans -u "nusstu\e0200000" -p "$(pass show nus)" -k "$(pass show canvas_api)" ~/nus
+Only files available through Canvas API are downloaded; externals in-text links and readings are not supported.
 
-# Dependencies
+> yans -k "\$(pass show canvas-api)" ~/nus
+
+By default, the files will not be overwritten, unless the option `--clobber` or `-c` is passed. E.g.,
+
+> yans --clobber -k "\$(pass show canvas-api)" ~/nus
+
+## Dependencies
 
 - `wget`
 - `curl`
-- `file`
-- `rsync`
 - `jq`
