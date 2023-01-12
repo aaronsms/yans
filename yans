@@ -102,7 +102,7 @@ sync_canvas_files() {
     course_code="${course_code%%/*}"
     mkdir -p "$course_code"
 
-    _curl "$CANVAS_DOMAIN$COURSES_API/$course_id/files" |\
+    _curl "$CANVAS_DOMAIN$COURSES_API/$course_id/files?per_page=5000" |\
       jq -r 'arrays | .[] | select(.locked == false) | .url, .folder_id, .display_name' |\
     while read -r url; do
       read -r folder_id
