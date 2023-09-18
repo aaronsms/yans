@@ -54,12 +54,7 @@ fi
 mkdir -p "$download_dir"
 cd "$download_dir" || exit 1
 
-###############################################################################
-
-CANVAS_DOMAIN="https://canvas.nus.edu.sg"
-AUTH_API="/api/v1/users/self"
-COURSES_API="/api/v1/courses"
-FOLDERS_API="/api/v1/folders"
+domain="https://canvas.nus.edu.sg"
 
 ###############################################################################
 
@@ -79,50 +74,49 @@ _wget() {
   fi
 }
 
-authenticate() {
-  printf "Verifying Canvas API key... "
-  data=$(_curl "$CANVAS_DOMAIN$AUTH_API")
-  if [ "$(echo "$data" | jq -r 'has("errors")')" = true ]; then
-    printf "\nAuthentication failed. ";
-    echo "$data" | jq -r '.errors[0].message'
-    exit 1;
-  fi
-  echo "Success!"
-}
+################
+# Authenticate #
+################
 
-sync_canvas_files() {
-  printf "Syncing Canvas files...\n"
+printf "Verifying Canvas API key... "
+data=$(_curl "$domain/api/v1/users/self")
+if [ "$(echo "$data" | jq -r 'has("errors")')" = true ]; then
+  printf "\nAuthentication failed. ";
+  echo "$data" | jq -r '.errors[0].message'
+  exit 1;
+fi
+echo "Success!"
 
-  _curl "$CANVAS_DOMAIN$COURSES_API" |\
-    jq -r '.[] | select(.course_code != null) | .name, .id, .course_code' |\
-  while read -r course_name; do
-    echo "$course_name"
-    read -r course_id
-    read -r course_code
-    course_code="${course_code%%/*}"
-    mkdir -p "$course_code"
+###############
+# Sync Canvas # 
+###############
 
-    _curl "$CANVAS_DOMAIN$COURSES_API/$course_id/files?per_page=5000" |\
-      jq -r 'arrays | .[] | select(.locked == false) | .url, .folder_id, .display_name' |\
-    while read -r url; do
-      read -r folder_id
-      read -r file_name
+printf "Syncing Canvas files...\n"
+_curl "$domain/api/v1/courses" | jq -r '.[] | select(.course_code != null) | .name, .id, .course_code' |\
+while read -r course_name; do
+  echo "$course_name"
+  read -r course_id
+  read -r course_code
+  DEBUG "course_id = ${course_id} | course_code = ${course_code}"
 
-      folder_name="$(eval echo '$'__yans_folder_"$folder_id")"
-      if [ -z "$folder_name" ]; then
-        folder_name="$(_curl "$CANVAS_DOMAIN$FOLDERS_API/$folder_id" | jq -r '.full_name')"
-        folder_name="${folder_name#course files/}"
-        eval "__yans_folder_$folder_id='$folder_name'"
-      fi
+  course_code="${course_code%%/*}"
+  mkdir -p "$course_code"
 
-      mkdir -p "$course_code/$folder_name"
-      _wget -O "$course_code/$folder_name/$file_name" "$url"
-    done
+  _curl "$domain/api/v1/courses/$course_id/files?per_page=5000" |\
+    jq -r 'arrays | .[] | select(.locked == false) | .url, .folder_id, .display_name' |\
+  while read -r url; do
+    read -r folder_id
+    read -r file_name
+    DEBUG "folder_id = ${folder_id} | folder_name = ${folder_name}"
+
+    folder_name="$(eval echo '$'__yans_folder_"$folder_id")"
+    if [ -z "$folder_name" ]; then
+      folder_name="$(_curl "$domain/api/v1/folders/$folder_id" | jq -r '.full_name')"
+      folder_name="${folder_name#course files/}"
+      eval "__yans_folder_$folder_id='$folder_name'"
+    fi
+
+    mkdir -p "$course_code/$folder_name"
+    _wget -O "$course_code/$folder_name/$file_name" "$url"
   done
-}
-
-main() {
-  authenticate && sync_canvas_files
-}
-
-main
+done
